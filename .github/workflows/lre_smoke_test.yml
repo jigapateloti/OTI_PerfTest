@@ -22,13 +22,14 @@ jobs:
           # -----------------------------
           # 1. AUTHENTICATION
           # -----------------------------
+          $baseUrl = "https://mspwva-ditapc14.doitt.nycnet:444/loadtest/rest"
           $loginBody = @{
             Username = "${{ secrets.LRE_USERNAME }}"
             Password = "${{ secrets.LRE_PASSWORD }}"
           } | ConvertTo-Json
 
           $loginResponse = Invoke-RestMethod `
-            -Uri "https://lre.example.com/authentication-point/authenticate" `
+            -Uri "$baseUrl/authentication/login" `
             -Method POST `
             -ContentType "application/json" `
             -Body $loginBody `
@@ -40,13 +41,13 @@ jobs:
           # 2. START TEST RUN
           # -----------------------------
           $startBody = @{
-            TestID  = 1234
+            TestID  = 1777
             Domain  = "DOB"
             Project = "DOBNOW"
           } | ConvertTo-Json
 
           $runResponse = Invoke-RestMethod `
-            -Uri "https://lre.example.com/v1/LoadTests/Start" `
+            -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs" `
             -Method POST `
             -ContentType "application/json" `
             -Body $startBody `
@@ -64,7 +65,7 @@ jobs:
             Start-Sleep -Seconds 20
 
             $statusResponse = Invoke-RestMethod `
-              -Uri "https://lre.example.com/v1/LoadTests/$runId/Status" `
+              -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/status" `
               -Method GET `
               -WebSession $session
 
@@ -78,7 +79,7 @@ jobs:
           # -----------------------------
           # 4. DOWNLOAD REPORT
           # -----------------------------
-          $reportUrl = "https://lre.example.com/v1/LoadTests/$runId/Report/html"
+          $reportUrl = "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/Report/html"
           $outputZip = "LRE-Report.zip"
 
           Invoke-WebRequest `

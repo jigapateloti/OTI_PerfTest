@@ -1,96 +1,74 @@
-name: LRE Automated Performance Test
+- name: Run LRE Test
+  shell: powershell
+  run: |
+    Write-Host "Authenticating to LRE..."
 
-on:
-  schedule:
-    # 7:00 AM EST → 12:00 UTC
-    - cron: "0 12 * * *"
-  workflow_dispatch:
+    # -----------------------------
+    # 1. AUTHENTICATION
+    # -----------------------------
+    $baseUrl = "https://mspwva-ditapc14.doitt.nycnet:444/loadtest/rest"
+    $loginBody = @{
+      Username = "***"
+      Password = "***"
+    } | ConvertTo-Json
 
-jobs:
-  run-lre-test:
-    runs-on: [self-hosted, lre-runner]
+    $loginResponse = Invoke-RestMethod `
+      -Uri "$baseUrl/authentication/login" `
+      -Method POST `
+      -ContentType "application/json" `
+      -Body $loginBody `
+      -SessionVariable session
 
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
+    Write-Host "Login successful."
 
-      - name: Run LRE Test
-        shell: pwsh
-        run: |
-          Write-Host "Authenticating to LRE..."
+    # -----------------------------
+    # 2. START TEST RUN
+    # -----------------------------
+    $startBody = @{
+      TestID  = 1777
+      Domain  = "DOB"
+      Project = "DOBNOW"
+    } | ConvertTo-Json
 
-          # -----------------------------
-          # 1. AUTHENTICATION
-          # -----------------------------
-          $baseUrl = "https://mspwva-ditapc14.doitt.nycnet:444/loadtest/rest"
-          $loginBody = @{
-            Username = "${{ secrets.LRE_USERNAME }}"
-            Password = "${{ secrets.LRE_PASSWORD }}"
-          } | ConvertTo-Json
+    $runResponse = Invoke-RestMethod `
+      -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs" `
+      -Method POST `
+      -ContentType "application/json" `
+      -Body $startBody `
+      -WebSession $session
 
-          $loginResponse = Invoke-RestMethod `
-            -Uri "$baseUrl/authentication/login" `
-            -Method POST `
-            -ContentType "application/json" `
-            -Body $loginBody `
-            -SessionVariable session
+    $runId = $runResponse.RunID
+    Write-Host "Triggered Test Run ID: $runId"
 
-          Write-Host "Login successful."
+    # -----------------------------
+    # 3. POLLING LOOP
+    # -----------------------------
+    $state = "Initializing"
 
-          # -----------------------------
-          # 2. START TEST RUN
-          # -----------------------------
-          $startBody = @{
-            TestID  = 1777
-            Domain  = "DOB"
-            Project = "DOBNOW"
-          } | ConvertTo-Json
+    do {
+      Start-Sleep -Seconds 20
 
-          $runResponse = Invoke-RestMethod `
-            -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs" `
-            -Method POST `
-            -ContentType "application/json" `
-            -Body $startBody `
-            -WebSession $session
+      $statusResponse = Invoke-RestMethod `
+        -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/status" `
+        -Method GET `
+        -WebSession $session
 
-          $runId = $runResponse.RunID
-          Write-Host "Triggered Test Run ID: $runId"
+      $state = $statusResponse.RunState
+      Write-Host "Current State: $state"
 
-          # -----------------------------
-          # 3. POLLING LOOP
-          # -----------------------------
-          $state = "Initializing"
+    } while ($state -ne "Finished" -and $state -ne "Failed")
 
-          do {
-            Start-Sleep -Seconds 20
+    Write-Host "Test completed with state: $state"
 
-            $statusResponse = Invoke-RestMethod `
-              -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/status" `
-              -Method GET `
-              -WebSession $session
+    # -----------------------------
+    # 4. DOWNLOAD REPORT
+    # -----------------------------
+    $reportUrl = "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/Report/html"
+    $outputZip = "LRE-Report.zip"
 
-            $state = $statusResponse.RunState
-            Write-Host "Current State: $state"
+    Invoke-WebRequest `
+      -Uri $reportUrl `
+      -OutFile $outputZip `
+      -WebSession $session
 
-          } while ($state -ne "Finished" -and $state -ne "Failed")
-
-          Write-Host "Test completed with state: $state"
-
-          # -----------------------------
-          # 4. DOWNLOAD REPORT
-          # -----------------------------
-          $reportUrl = "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/Report/html"
-          $outputZip = "LRE-Report.zip"
-
-          Invoke-WebRequest `
-            -Uri $reportUrl `
-            -OutFile $outputZip `
-            -WebSession $session
-
-          Write-Host "Report downloaded: $outputZip"
-
-      - name: Upload LRE Report Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: LRE-Report
-          path: LRE-Report.zip
+    Write-Host "Report downloaded: $outputZip"

@@ -25,7 +25,7 @@ jobs:
             # ---------------------------------
             # 1. AUTHENTICATION
             # ---------------------------------
-            $baseUrl = "https://mspwva-ditapc14.doitt.nycnet:444/loadtest/rest"
+            $baseUrl = $env:BASE_URL
             if (-not $baseUrl) { throw "BASE_URL is not set." }
 
             $loginBody = @{

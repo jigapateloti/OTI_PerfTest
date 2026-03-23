@@ -1,0 +1,95 @@
+name: LRE Automated Performance Test
+
+on:
+  schedule:
+    # 7:00 AM EST → 12:00 UTC
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-lre-test:
+    runs-on: [self-hosted, lre-runner]
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Run LRE Test
+        shell: pwsh
+        run: |
+          Write-Host "Authenticating to LRE..."
+
+          # -----------------------------
+          # 1. AUTHENTICATION
+          # -----------------------------
+          $loginBody = @{
+            Username = "${{ secrets.LRE_USERNAME }}"
+            Password = "${{ secrets.LRE_PASSWORD }}"
+          } | ConvertTo-Json
+
+          $loginResponse = Invoke-RestMethod `
+            -Uri "https://lre.example.com/authentication-point/authenticate" `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body $loginBody `
+            -SessionVariable session
+
+          Write-Host "Login successful."
+
+          # -----------------------------
+          # 2. START TEST RUN
+          # -----------------------------
+          $startBody = @{
+            TestID  = 1234
+            Domain  = "DOB"
+            Project = "DOBNOW"
+          } | ConvertTo-Json
+
+          $runResponse = Invoke-RestMethod `
+            -Uri "https://lre.example.com/v1/LoadTests/Start" `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body $startBody `
+            -WebSession $session
+
+          $runId = $runResponse.RunID
+          Write-Host "Triggered Test Run ID: $runId"
+
+          # -----------------------------
+          # 3. POLLING LOOP
+          # -----------------------------
+          $state = "Initializing"
+
+          do {
+            Start-Sleep -Seconds 20
+
+            $statusResponse = Invoke-RestMethod `
+              -Uri "https://lre.example.com/v1/LoadTests/$runId/Status" `
+              -Method GET `
+              -WebSession $session
+
+            $state = $statusResponse.RunState
+            Write-Host "Current State: $state"
+
+          } while ($state -ne "Finished" -and $state -ne "Failed")
+
+          Write-Host "Test completed with state: $state"
+
+          # -----------------------------
+          # 4. DOWNLOAD REPORT
+          # -----------------------------
+          $reportUrl = "https://lre.example.com/v1/LoadTests/$runId/Report/html"
+          $outputZip = "LRE-Report.zip"
+
+          Invoke-WebRequest `
+            -Uri $reportUrl `
+            -OutFile $outputZip `
+            -WebSession $session
+
+          Write-Host "Report downloaded: $outputZip"
+
+      - name: Upload LRE Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LRE-Report
+          path: LRE-Report.zip

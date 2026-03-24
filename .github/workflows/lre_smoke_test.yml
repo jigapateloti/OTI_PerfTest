@@ -34,7 +34,7 @@ jobs:
             } | ConvertTo-Json
 
             $loginResponse = Invoke-RestMethod `
-              -Uri "$baseUrl/authentication/login" `
+              -Uri "https://mspwva-ditapc14.doitt.nycnet:444/Loadtest/pcx/login" `
               -Method POST `
               -ContentType "application/json" `
               -Body $loginBody `

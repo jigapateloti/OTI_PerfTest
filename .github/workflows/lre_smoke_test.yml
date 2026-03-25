@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-lre-test:
-    runs-on: lre-runner
+    runs-on: self-hosted   # IMPORTANT: must run inside NYCNET
 
     env:
       LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
@@ -108,11 +108,17 @@ jobs:
             -WebSession $session `
             -ErrorAction Stop
 
-          # Correlate <ID> Ordinal=4 → GetResultID
           $xmlResults = [xml]$resultsResponse.Content
-          $resultId = $xmlResults.SelectNodes("//ID")[3].InnerText
 
-          Write-Host "Result ID: $resultId"
+          # Find the RunResult where Type = "HTML REPORT"
+          $htmlReportNode = $xmlResults.SelectSingleNode("//RunResult[Type='HTML REPORT']")
+
+          if (-not $htmlReportNode) {
+              throw "Could not find HTML REPORT in results."
+          }
+
+          $resultId = $htmlReportNode.ID
+          Write-Host "HTML Report Result ID: $resultId"
 
           # -----------------------------
           # T05_Get_Report
@@ -126,3 +132,9 @@ jobs:
             -ErrorAction Stop
 
           Write-Host "Report downloaded: LRE-Report.zip"
+
+      - name: Upload LRE Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LRE-HTML-Report
+          path: LRE-Report.zip

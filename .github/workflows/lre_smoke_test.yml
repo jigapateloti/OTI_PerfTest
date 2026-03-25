@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-lre-test:
-    runs-on: windows-latest
+    runs-on: lre-runner
 
     env:
       LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}

@@ -6,116 +6,123 @@ on:
 jobs:
   run-lre-test:
     runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
+    env:
+      LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
+      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
+      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
+      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
+      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
+
+      LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
+      LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
+
+    steps:
       - name: Run LRE Test
         shell: powershell
-        env:
-          BASE_URL: ${{ secrets.LRE_BASE_URL }}
-          LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
-          LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
-          POLL_INTERVAL_SECONDS: 20
-          MAX_POLL_ATTEMPTS: 90
         run: |
           Write-Host "Authenticating to LRE..."
 
-          try {
-            # ---------------------------------
-            # 1. AUTHENTICATION
-            # ---------------------------------
-            $baseUrl = $env:BASE_URL
-            if (-not $baseUrl) { throw "BASE_URL is not set." }
+          # -----------------------------
+          # T01_Login
+          # -----------------------------
+          $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
 
-            $loginBody = @{
-              Username = $env:LRE_USERNAME
-              Password = $env:LRE_PASSWORD
-            } | ConvertTo-Json
+          $loginBody = @{
+            ClientIdKey     = $env:LRE_USERNAME
+            ClientSecretKey = $env:LRE_PASSWORD
+          } | ConvertTo-Json
 
-            $loginResponse = Invoke-RestMethod `
-              -Uri "https://mspwva-ditapc14.doitt.nycnet:444/Loadtest/pcx/login" `
-              -Method POST `
-              -ContentType "application/json" `
-              -Body $loginBody `
-              -SessionVariable session `
-              -ErrorAction Stop
+          $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 
-            Write-Host "Login successful."
+          $loginResponse = Invoke-WebRequest `
+            -Uri $loginUrl `
+            -Method POST `
+            -Body $loginBody `
+            -ContentType "application/json" `
+            -WebSession $session `
+            -ErrorAction Stop
 
-            # ---------------------------------
-            # 2. START TEST RUN
-            # ---------------------------------
-            $startBody = @{
-              TestID  = 1777
-              Domain  = "DOB"
-              Project = "DOBNOW"
-            } | ConvertTo-Json
+          Write-Host "Login successful."
 
-            $runResponse = Invoke-RestMethod `
-              -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs" `
-              -Method POST `
-              -ContentType "application/json" `
-              -Body $startBody `
+          # -----------------------------
+          # T02_Start_Test_Run
+          # -----------------------------
+          $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
+
+          $startBody = @{
+            PostRunAction   = "Collate And Analyze"
+            TestID          = [int]$env:LRE_TEST_ID
+            TestInstanceID  = [int]$env:LRE_TEST_INSTANCE_ID
+            TimeslotDuration = @{
+              Hours   = 0
+              Minutes = 30
+            }
+            VudsMode = $false
+          } | ConvertTo-Json -Depth 5
+
+          $startResponse = Invoke-WebRequest `
+            -Uri $startUrl `
+            -Method POST `
+            -Body $startBody `
+            -ContentType "application/json" `
+            -WebSession $session `
+            -ErrorAction Stop
+
+          # Correlate <ID> → GetRunID
+          $runId = ([xml]$startResponse.Content).Run.ID
+          Write-Host "Run ID: $runId"
+
+          # -----------------------------
+          # T03_Get_Run_Status (Polling)
+          # -----------------------------
+          $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
+
+          do {
+            Start-Sleep -Seconds 20
+
+            $statusResponse = Invoke-WebRequest `
+              -Uri $statusUrl `
+              -Method GET `
               -WebSession $session `
               -ErrorAction Stop
 
-            $runId = $runResponse.RunID
-            if (-not $runId) { throw "Failed to obtain RunID from start response." }
-            Write-Host "Triggered Test Run ID: $runId"
+            $xml = [xml]$statusResponse.Content
+            $state = $xml.Run.RunState
 
-            # ---------------------------------
-            # 3. POLLING LOOP WITH TIMEOUT
-            # ---------------------------------
-            $state = "Initializing"
-            $pollInterval = [int]$env:POLL_INTERVAL_SECONDS
-            $maxAttempts = [int]$env:MAX_POLL_ATTEMPTS
-            $attempt = 0
+            Write-Host "Current State: $state"
 
-            do {
-              Start-Sleep -Seconds $pollInterval
-              $attempt++
+          } while ($state -ne "Finished" -and $state -ne "Failed")
 
-              $statusResponse = Invoke-RestMethod `
-                -Uri "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/status" `
-                -Method GET `
-                -WebSession $session `
-                -ErrorAction Stop
+          Write-Host "Run completed with state: $state"
 
-              $state = $statusResponse.RunState
-              Write-Host "Current State: $state (attempt $attempt of $maxAttempts)"
+          # -----------------------------
+          # T04_Get_Results_Data
+          # -----------------------------
+          $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
-              if ($attempt -ge $maxAttempts) {
-                throw "Polling timed out after $attempt attempts."
-              }
+          $resultsResponse = Invoke-WebRequest `
+            -Uri $resultsUrl `
+            -Method GET `
+            -WebSession $session `
+            -ErrorAction Stop
 
-            } while ($state -ne "Finished" -and $state -ne "Failed")
+          # Correlate <ID> Ordinal=4 → GetResultID
+          $xmlResults = [xml]$resultsResponse.Content
+          $resultId = $xmlResults.SelectNodes("//ID")[3].InnerText
 
-            Write-Host "Test completed with state: $state"
+          Write-Host "Result ID: $resultId"
 
-            if ($state -ne "Finished") {
-              throw "Run ended with non-success state: $state"
-            }
+          # -----------------------------
+          # T05_Get_Report
+          # -----------------------------
+          $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId"
 
-            # ---------------------------------
-            # 4. DOWNLOAD REPORT
-            # ---------------------------------
-            $reportUrl = "$baseUrl/domains/DOB/projects/DOBNOW/runs/$runId/Report/html"
-            $outputZip = "LRE-Report.zip"
+          Invoke-WebRequest `
+            -Uri $reportUrl `
+            -OutFile "LRE-Report.zip" `
+            -WebSession $session `
+            -ErrorAction Stop
 
-            Invoke-WebRequest `
-              -Uri $reportUrl `
-              -OutFile $outputZip `
-              -WebSession $session `
-              -ErrorAction Stop
-
-            if (Test-Path $outputZip) {
-              Write-Host "Report downloaded: $outputZip"
-            } else {
-              throw "Report download failed; file not found: $outputZip"
-            }
-
-          } catch {
-            Write-Error "Error running LRE test: $_"
-            exit 1
-          }
+          Write-Host "Report downloaded: LRE-Report.zip"

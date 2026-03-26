@@ -167,6 +167,26 @@ jobs:
 
           Write-Host "Report downloaded: LRE-Report.zip"
 
+          # -----------------------------
+          # T06_Send Notification to Teams Workflow
+          # -----------------------------
+          $teamsWebhookUrl = "${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}"
+
+          $payload = @{
+              runId    = $runId
+              status   = $state
+              reportUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              message  = "HTML report is available in the pipeline artifacts."
+              runDate  = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+          }
+
+          Write-Host "Sending notification to Teams workflow..."
+          Invoke-RestMethod `
+            -Uri $teamsWebhookUrl `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body ($payload | ConvertTo-Json -Depth 5)
+
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4
         with:

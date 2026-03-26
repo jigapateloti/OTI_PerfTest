@@ -26,14 +26,15 @@ jobs:
 
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          # -----------------------------
-          # T01_Login (JSON)
-          # -----------------------------
+          # Force JSON responses
           $headers = @{
             "Accept" = "application/json"
             "Content-Type" = "application/json"
           }
 
+          # -----------------------------
+          # T01_Login (JSON)
+          # -----------------------------
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
 
           $loginBody = @{
@@ -107,21 +108,44 @@ jobs:
           Write-Host "Run completed with state: $state"
 
           # -----------------------------
-          # T04_Get_Results_Data (JSON)
+          # Cooling Period
+          # -----------------------------
+          Write-Host "Waiting 60 seconds for LRE to generate HTML report..."
+          Start-Sleep -Seconds 60
+
+          # -----------------------------
+          # T04_Get_Results_Data (JSON) with retry
           # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
-          $resultsResponse = Invoke-RestMethod `
-            -Uri $resultsUrl `
-            -Method GET `
-            -Headers $headers `
-            -WebSession $session `
-            -ErrorAction Stop
+          Write-Host "Checking for HTML report availability..."
 
-          $htmlReportNode = $resultsResponse.RunResult | Where-Object { $_.Type -eq "HTML REPORT" }
+          $maxRetries = 10
+          $retryDelay = 15
+          $reportReady = $false
 
-          if (-not $htmlReportNode) {
-            throw "Could not find HTML REPORT in results."
+          for ($i = 1; $i -le $maxRetries; $i++) {
+
+              $resultsResponse = Invoke-RestMethod `
+                -Uri $resultsUrl `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $session `
+                -ErrorAction Stop
+
+              $htmlReportNode = $resultsResponse.RunResult | Where-Object { $_.Type -eq "HTML REPORT" }
+
+              if ($htmlReportNode) {
+                  $reportReady = $true
+                  break
+              }
+
+              Write-Host "HTML report not ready yet. Attempt $i of $maxRetries. Waiting $retryDelay seconds..."
+              Start-Sleep -Seconds $retryDelay
+          }
+
+          if (-not $reportReady) {
+              throw "HTML REPORT did not appear after waiting."
           }
 
           $resultId = $htmlReportNode.ID

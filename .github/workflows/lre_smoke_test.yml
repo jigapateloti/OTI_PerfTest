@@ -29,6 +29,11 @@ jobs:
           # -----------------------------
           # T01_Login (JSON)
           # -----------------------------
+          $headers = @{
+            "Accept" = "application/json"
+            "Content-Type" = "application/json"
+          }
+
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
 
           $loginBody = @{
@@ -41,15 +46,15 @@ jobs:
           $loginResponse = Invoke-RestMethod `
             -Uri $loginUrl `
             -Method POST `
+            -Headers $headers `
             -Body $loginBody `
-            -ContentType "application/json" `
             -WebSession $session `
             -ErrorAction Stop
 
           Write-Host "Login successful."
 
           # -----------------------------
-          # T02_Start_Test_Run (XML)
+          # T02_Start_Test_Run (JSON)
           # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
 
@@ -64,40 +69,37 @@ jobs:
             VudsMode = $false
           } | ConvertTo-Json -Depth 5
 
-          $startResponse = Invoke-WebRequest `
+          $startResponse = Invoke-RestMethod `
             -Uri $startUrl `
             -Method POST `
+            -Headers $headers `
             -Body $startBody `
-            -ContentType "application/json" `
             -WebSession $session `
-            -UseBasicParsing `
             -ErrorAction Stop
 
-          $runId = ([xml]$startResponse.Content).Run.ID
+          $runId = $startResponse.ID
           Write-Host "Run ID: $runId"
 
           if (-not $runId) {
-            throw "Run ID is empty - LRE did not return valid XML."
+            throw "Run ID is empty - LRE did not return valid JSON."
           }
 
           # -----------------------------
-          # T03_Get_Run_Status (XML)
+          # T03_Get_Run_Status (JSON)
           # -----------------------------
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
 
           do {
             Start-Sleep -Seconds 20
 
-            $statusResponse = Invoke-WebRequest `
+            $statusResponse = Invoke-RestMethod `
               -Uri $statusUrl `
               -Method GET `
+              -Headers $headers `
               -WebSession $session `
-              -UseBasicParsing `
               -ErrorAction Stop
 
-            $xmlStatus = [xml]$statusResponse.Content
-            $state = $xmlStatus.Run.RunState
-
+            $state = $statusResponse.RunState
             Write-Host "Current State: $state"
 
           } while ($state -ne "Finished" -and $state -ne "Failed")
@@ -105,20 +107,18 @@ jobs:
           Write-Host "Run completed with state: $state"
 
           # -----------------------------
-          # T04_Get_Results_Data (XML)
+          # T04_Get_Results_Data (JSON)
           # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
-          $resultsResponse = Invoke-WebRequest `
+          $resultsResponse = Invoke-RestMethod `
             -Uri $resultsUrl `
             -Method GET `
+            -Headers $headers `
             -WebSession $session `
-            -UseBasicParsing `
             -ErrorAction Stop
 
-          $xmlResults = [xml]$resultsResponse.Content
-
-          $htmlReportNode = $xmlResults.SelectSingleNode("//RunResult[Type='HTML REPORT']")
+          $htmlReportNode = $resultsResponse.RunResult | Where-Object { $_.Type -eq "HTML REPORT" }
 
           if (-not $htmlReportNode) {
             throw "Could not find HTML REPORT in results."

@@ -156,7 +156,7 @@ jobs:
           # -----------------------------
           # T05_Get_Report (ZIP)
           # -----------------------------
-          $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId"
+          $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
 
           Invoke-WebRequest `
             -Uri $reportUrl `

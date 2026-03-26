@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-lre-test:
-    runs-on: self-hosted   # Must run inside NYCNET
+    runs-on: self-hosted
 
     env:
       LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
@@ -24,11 +24,10 @@ jobs:
         run: |
           Write-Host "Authenticating to LRE..."
 
-          # Force TLS 1.2
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
           # -----------------------------
-          # T01_Login (JSON → RestMethod)
+          # T01_Login (JSON)
           # -----------------------------
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
 
@@ -50,7 +49,7 @@ jobs:
           Write-Host "Login successful."
 
           # -----------------------------
-          # T02_Start_Test_Run (XML → WebRequest)
+          # T02_Start_Test_Run (XML)
           # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
 
@@ -78,11 +77,11 @@ jobs:
           Write-Host "Run ID: $runId"
 
           if (-not $runId) {
-            throw "Run ID is empty — LRE did not return valid XML."
+            throw "Run ID is empty - LRE did not return valid XML."
           }
 
           # -----------------------------
-          # T03_Get_Run_Status (XML → WebRequest)
+          # T03_Get_Run_Status (XML)
           # -----------------------------
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
 
@@ -106,7 +105,7 @@ jobs:
           Write-Host "Run completed with state: $state"
 
           # -----------------------------
-          # T04_Get_Results_Data (XML → WebRequest)
+          # T04_Get_Results_Data (XML)
           # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
@@ -119,7 +118,6 @@ jobs:
 
           $xmlResults = [xml]$resultsResponse.Content
 
-          # Find the RunResult where Type = "HTML REPORT"
           $htmlReportNode = $xmlResults.SelectSingleNode("//RunResult[Type='HTML REPORT']")
 
           if (-not $htmlReportNode) {
@@ -130,7 +128,7 @@ jobs:
           Write-Host "HTML Report Result ID: $resultId"
 
           # -----------------------------
-          # T05_Get_Report (ZIP → WebRequest)
+          # T05_Get_Report (ZIP)
           # -----------------------------
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId"
 

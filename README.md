@@ -203,7 +203,7 @@ Credentials are protected using GitHub Secrets.
 
 ---
 
-# 🎯 Summary for Managers
+# 🎯 Summary
 
 This pipeline automates the entire LRE smoke test process:
 

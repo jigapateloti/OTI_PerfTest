@@ -1,28 +1,100 @@
-name: LRE Load Test (Scenario Controlled)
+name: LRE Unified Load Test
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Execution mode: scenario / timeslot / hybrid"
+        required: true
+        default: "scenario"
+        type: choice
+        options:
+          - scenario
+          - timeslot
+          - hybrid
+      duration_hours:
+        description: "Timeslot hours (for timeslot/hybrid)"
+        required: true
+        default: "1"
+        type: string
+      duration_minutes:
+        description: "Timeslot minutes (for timeslot/hybrid)"
+        required: true
+        default: "0"
+        type: string
+      send_teams_notification:
+        description: "Send Teams Adaptive Card"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - true
+          - false
+      send_slack_notification:
+        description: "Send Slack notification"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - true
+          - false
+      enable_trending_upload:
+        description: "Upload results to Trending"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - true
+          - false
 
 jobs:
   run-lre-test:
     runs-on: self-hosted
 
     env:
+      # LRE config
       LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
-      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
-      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
-      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
-      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
-      TENANT_ID: ${{ vars.TENANT_ID }}
+      LRE_DOMAIN: DEFAULT
+      LRE_PROJECT: MyCity
+      LRE_TEST_ID: 180
+      LRE_TEST_INSTANCE_ID: 9
+      TENANT_ID: 6
 
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
 
+      # Notifications
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # Trending
+      LRE_TREND_REPORT_ID: ${{ vars.LRE_TREND_REPORT_ID }}
+
+      # Inputs as env
+      INPUT_MODE: ${{ github.event.inputs.mode }}
+      INPUT_DURATION_HOURS: ${{ github.event.inputs.duration_hours }}
+      INPUT_DURATION_MINUTES: ${{ github.event.inputs.duration_minutes }}
+      INPUT_SEND_TEAMS: ${{ github.event.inputs.send_teams_notification }}
+      INPUT_SEND_SLACK: ${{ github.event.inputs.send_slack_notification }}
+      INPUT_ENABLE_TRENDING: ${{ github.event.inputs.enable_trending_upload }}
+
     steps:
-      - name: Run LRE Load Test
+      - name: Run LRE Load Test (Unified)
         shell: powershell
         run: |
-          Write-Host "Authenticating to LRE..."
+          # Read and convert inputs
+          $Mode            = $env:INPUT_MODE
+          $DurationHours   = [int]$env:INPUT_DURATION_HOURS
+          $DurationMinutes = [int]$env:INPUT_DURATION_MINUTES
+          $SendTeams       = [bool]::Parse($env:INPUT_SEND_TEAMS)
+          $SendSlack       = [bool]::Parse($env:INPUT_SEND_SLACK)
+          $EnableTrending  = [bool]::Parse($env:INPUT_ENABLE_TRENDING)
+
+          Write-Host "Mode: $Mode"
+          Write-Host "Duration: $DurationHours h $DurationMinutes m"
+          Write-Host "SendTeams: $SendTeams"
+          Write-Host "SendSlack: $SendSlack"
+          Write-Host "EnableTrending: $EnableTrending"
 
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -32,35 +104,67 @@ jobs:
           }
 
           # LOGIN
+          Write-Host "Authenticating to LRE..."
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
-
           $loginBody = @{
             ClientIdKey     = $env:LRE_USERNAME
             ClientSecretKey = $env:LRE_PASSWORD
           } | ConvertTo-Json
-
           $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-
           Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session -ErrorAction Stop
           Write-Host "Login successful."
 
-          # START RUN (Scenario Schedule)
+          # BUILD START BODY BASED ON MODE
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
 
-          $startBody = @{
-            PostRunAction   = "Collate And Analyze"
-            TestID          = [int]$env:LRE_TEST_ID
-            TestInstanceID  = [int]$env:LRE_TEST_INSTANCE_ID
-            VudsMode        = $false
-          } | ConvertTo-Json -Depth 5
+          $useTimeSlotDuration   = $false
+          $useControllerScenario = $false
 
+          if ($Mode -eq "scenario") {
+            $useTimeSlotDuration   = $false
+            $useControllerScenario = $true
+          }
+          elseif ($Mode -eq "timeslot") {
+            $useTimeSlotDuration   = $true
+            $useControllerScenario = $false
+          }
+          elseif ($Mode -eq "hybrid") {
+            $useTimeSlotDuration   = $true
+            $useControllerScenario = $true
+          }
+          else {
+            throw "Invalid mode: $Mode. Must be scenario, timeslot, or hybrid."
+          }
+
+          $startBodyHash = @{
+            PostRunAction         = "Collate And Analyze"
+            TestID                = [int]$env:LRE_TEST_ID
+            TestInstanceID        = [int]$env:LRE_TEST_INSTANCE_ID
+            VudsMode              = $false
+            UseTimeSlotDuration   = $useTimeSlotDuration
+            UseControllerScenario = $useControllerScenario
+          }
+
+          if ($useTimeSlotDuration) {
+            if (($DurationHours -eq 0) -and ($DurationMinutes -lt 30)) {
+              throw "Timeslot duration must be at least 30 minutes when Hours = 0."
+            }
+            $startBodyHash["TimeslotDuration"] = @{
+              Hours   = $DurationHours
+              Minutes = $DurationMinutes
+            }
+          }
+
+          $startBody = $startBodyHash | ConvertTo-Json -Depth 10
+
+          Write-Host "Starting LRE run with mode: $Mode"
           $startResponse = Invoke-RestMethod -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session -ErrorAction Stop
           $runId = $startResponse.ID
+          if (-not $runId) { throw "Run ID is empty - LRE did not return valid JSON." }
           Write-Host "Run ID: $runId"
 
           # POLLING LOOP
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
-
           do {
             Start-Sleep -Seconds 20
             $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
@@ -71,35 +175,124 @@ jobs:
           Write-Host "Run completed with state: $state"
 
           # COOLING PERIOD
+          Write-Host "Waiting 120 seconds for LRE to generate HTML report..."
           Start-Sleep -Seconds 120
 
           # GET RESULTS
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
-
           $maxRetries = 15
           $retryDelay = 15
           $htmlReportNode = $null
 
           for ($i = 1; $i -le $maxRetries; $i++) {
-              $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
-              $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
-              if ($htmlReportNode) { break }
-              Start-Sleep -Seconds $retryDelay
+            $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
+            $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
+            if ($htmlReportNode) { break }
+            Write-Host "HTML report not ready. Attempt $i of $maxRetries..."
+            Start-Sleep -Seconds $retryDelay
           }
 
           if (-not $htmlReportNode) {
-              throw "HTML REPORT did not appear after waiting."
+            throw "HTML REPORT did not appear after waiting."
           }
 
           $resultId = $htmlReportNode.ID
+          Write-Host "HTML Report Result ID: $resultId"
 
           # DOWNLOAD REPORT
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
+          $reportFile = "LRE-Report-$runId.zip"
+          Invoke-WebRequest -Uri $reportUrl -OutFile $reportFile -WebSession $session -UseBasicParsing -ErrorAction Stop
+          Write-Host "Report downloaded: $reportFile"
 
-          Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing -ErrorAction Stop
+          # TRENDING UPLOAD (OPTIONAL)
+          if ($EnableTrending -and $env:LRE_TREND_REPORT_ID) {
+            Write-Host "Uploading results to Trending (Report ID: $env:LRE_TREND_REPORT_ID)..."
+            $trendUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Run/$runId"
+            try {
+              Invoke-RestMethod -Uri $trendUrl -Method POST -Headers $headers -WebSession $session -ErrorAction Stop
+              Write-Host "Trending upload completed."
+            }
+            catch {
+              Write-Host "Trending upload failed: $($_.Exception.Message)"
+            }
+          }
+          else {
+            Write-Host "Trending upload disabled or Trend Report ID not set."
+          }
+
+          # NOTIFICATIONS
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $now    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+
+          if ($SendTeams -and $env:TEAMS_WEBHOOK_URL) {
+            Write-Host "Sending Teams Adaptive Card..."
+            $teamsPayload = @{
+              "@type"    = "MessageCard"
+              "@context" = "http://schema.org/extensions"
+              "summary"  = "LRE Load Test Result"
+              "themeColor" = "0076D7"
+              "title"    = "LRE Load Test Completed"
+              "sections" = @(
+                @{
+                  "activityTitle"    = "Run ID: $runId"
+                  "activitySubtitle" = "Mode: $Mode | State: $state"
+                  "facts" = @(
+                    @{ "name" = "Test ID";          "value" = "$env:LRE_TEST_ID" },
+                    @{ "name" = "Test Instance ID"; "value" = "$env:LRE_TEST_INSTANCE_ID" },
+                    @{ "name" = "Duration";         "value" = "$DurationHours h $DurationMinutes m" },
+                    @{ "name" = "Run URL";          "value" = "$runUrl" },
+                    @{ "name" = "Report File";      "value" = "$reportFile" },
+                    @{ "name" = "Timestamp";        "value" = "$now" }
+                  )
+                }
+              )
+              "potentialAction" = @(
+                @{
+                  "@type" = "OpenUri"
+                  "name"  = "View GitHub Run"
+                  "targets" = @(
+                    @{ "os" = "default"; "uri" = "$runUrl" }
+                  )
+                }
+              )
+            } | ConvertTo-Json -Depth 10
+
+            Invoke-RestMethod -Uri $env:TEAMS_WEBHOOK_URL -Method POST -ContentType "application/json" -Body $teamsPayload -ErrorAction Stop
+          }
+          else {
+            Write-Host "Teams notification disabled or webhook not set."
+          }
+
+          if ($SendSlack -and $env:SLACK_WEBHOOK_URL) {
+            Write-Host "Sending Slack notification..."
+            $slackPayload = @{
+              text = "LRE Load Test Completed"
+              attachments = @(
+                @{
+                  color = if ($state -eq "Finished") { "good" } else { "danger" }
+                  title = "Run ID: $runId"
+                  fields = @(
+                    @{ title = "Mode";       value = "$Mode";                          short = $true },
+                    @{ title = "State";      value = "$state";                         short = $true },
+                    @{ title = "Test ID";    value = "$env:LRE_TEST_ID";               short = $true },
+                    @{ title = "Instance";   value = "$env:LRE_TEST_INSTANCE_ID";      short = $true },
+                    @{ title = "Duration";   value = "$DurationHours h $DurationMinutes m"; short = $true },
+                    @{ title = "GitHub Run"; value = "$runUrl";                        short = $false }
+                  )
+                  ts = [int][double]::Parse((Get-Date -UFormat %s))
+                }
+              )
+            } | ConvertTo-Json -Depth 10
+
+            Invoke-RestMethod -Uri $env:SLACK_WEBHOOK_URL -Method POST -ContentType "application/json" -Body $slackPayload -ErrorAction Stop
+          }
+          else {
+            Write-Host "Slack notification disabled or webhook not set."
+          }
 
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LRE-HTML-Report
-          path: LRE-Report.zip
+          path: LRE-Report-*.zip

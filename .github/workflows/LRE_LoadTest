@@ -1,0 +1,148 @@
+name: LRE Load Test (1 Hour)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-lre-test:
+    runs-on: self-hosted
+
+    env:
+      LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
+      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
+      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
+      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
+      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
+
+      LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
+      LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
+
+    steps:
+      - name: Run LRE Load Test
+        shell: powershell
+        run: |
+          Write-Host "Authenticating to LRE..."
+
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $headers = @{
+            "Accept" = "application/json"
+            "Content-Type" = "application/json"
+          }
+
+          # -----------------------------
+          # T01_Login
+          # -----------------------------
+          $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
+
+          $loginBody = @{
+            ClientIdKey     = $env:LRE_USERNAME
+            ClientSecretKey = $env:LRE_PASSWORD
+          } | ConvertTo-Json
+
+          $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+          $loginResponse = Invoke-RestMethod `
+            -Uri $loginUrl `
+            -Method POST `
+            -Headers $headers `
+            -Body $loginBody `
+            -WebSession $session `
+            -ErrorAction Stop
+
+          Write-Host "Login successful."
+
+          # -----------------------------
+          # T02_Start_Load_Test_Run (1 hour)
+          # -----------------------------
+          $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
+
+          $startBody = @{
+            PostRunAction   = "Collate And Analyze"
+            TestID          = [int]$env:LRE_TEST_ID
+            TestInstanceID  = [int]$env:LRE_TEST_INSTANCE_ID
+            TimeslotDuration = @{
+              Hours   = 1
+              Minutes = 0
+            }
+            VudsMode = $false
+          } | ConvertTo-Json -Depth 5
+
+          $startResponse = Invoke-RestMethod `
+            -Uri $startUrl `
+            -Method POST `
+            -Headers $headers `
+            -Body $startBody `
+            -WebSession $session `
+            -ErrorAction Stop
+
+          $runId = $startResponse.ID
+          Write-Host "Run ID: $runId"
+
+          if (-not $runId) {
+            throw "Run ID is empty - LRE did not return valid JSON."
+          }
+
+          # -----------------------------
+          # T03_Get_Run_Status
+          # -----------------------------
+          $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
+
+          do {
+            Start-Sleep -Seconds 20
+
+            $statusResponse = Invoke-RestMethod `
+              -Uri $statusUrl `
+              -Method GET `
+              -Headers $headers `
+              -WebSession $session `
+              -ErrorAction Stop
+
+            $state = $statusResponse.RunState
+            Write-Host "Current State: $state"
+
+          } while ($state -ne "Finished" -and $state -ne "Failed")
+
+          Write-Host "Run completed with state: $state"
+
+          # -----------------------------
+          # Cooling Period (recommended for 1h test)
+          # -----------------------------
+          Write-Host "Waiting 120 seconds for LRE to generate HTML report..."
+          Start-Sleep -Seconds 120
+
+          # -----------------------------
+          # T04_Get_Results_Data (retry logic)
+          # -----------------------------
+          $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
+
+          Write-Host "Checking for HTML report availability..."
+
+          $maxRetries = 15
+          $retryDelay = 15
+          $reportReady = $false
+          $htmlReportNode = $null
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+
+              $resultsResponse = Invoke-RestMethod `
+                -Uri $resultsUrl `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $session `
+                -ErrorAction Stop
+
+              $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
+
+              if ($htmlReportNode) {
+                  $reportReady = $true
+                  break
+              }
+
+              Write-Host "HTML report not ready yet. Attempt $i of $maxRetries. Waiting $retryDelay seconds..."
+              Start-Sleep -Seconds $retryDelay
+          }
+
+          if (-not $reportReady) {
+              throw "HTML REPORT

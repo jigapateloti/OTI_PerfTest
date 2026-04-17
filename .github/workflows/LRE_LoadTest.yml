@@ -145,4 +145,4 @@ jobs:
           }
 
           if (-not $reportReady) {
-              throw "HTML REPORT
+              throw "HTML REPORT"

@@ -1,4 +1,4 @@
-name: LRE Load Test (1 Hour with Ramp Logic)
+name: LRE Load Test (Scenario Controlled)
 
 on:
   workflow_dispatch:
@@ -54,60 +54,22 @@ jobs:
           Write-Host "Login successful."
 
           # -----------------------------
-          # START RUN WITH RAMP LOGIC
+          # START RUN (Scenario Controlled)
           # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
 
-          # RAMP LOGIC
-          # Adjust these values as needed
-          $rampUpVusers = 1
-          $rampUpEverySeconds = 15
-
-          $steadyStateDurationMinutes = 60
-
-          $rampDownVusers = 1
-          $rampDownEverySeconds = 15
+          # IMPORTANT:
+          # No TimeslotDuration
+          # No VusersDistribution
+          # No ramp logic
+          # LRE will use the schedule defined in the Test Instance
 
           $startBody = @{
             PostRunAction   = "Collate And Analyze"
             TestID          = [int]$env:LRE_TEST_ID
             TestInstanceID  = [int]$env:LRE_TEST_INSTANCE_ID
-
-            TimeslotDuration = @{
-              Hours   = 1
-              Minutes = 0
-            }
-
-            # NEW: Ramp-up and Ramp-down logic
-            VusersDistribution = @{
-              Groups = @(
-                @{
-                  GroupName = "ChildCareUserCreation"
-                  # INITIALIZE
-                  Initialize = @{
-                    Vusers = $rampUpVusers
-                    Pacing  = "00:00:01"
-                  }
-                  # RAMP-UP
-                  Start = @{
-                    Vusers = $rampUpVusers
-                    Pacing = ("00:00:{0:D2}" -f $rampUpEverySeconds)
-                  }
-                  # STEADY STATE
-                  Duration = @{
-                    Duration = ("00:{0:D2}:00" -f $steadyStateDurationMinutes)
-                  }
-                  # RAMP-DOWN
-                  Stop = @{
-                    Vusers = $rampDownVusers
-                    Pacing = ("00:00:{0:D2}" -f $rampDownEverySeconds)
-                  }
-                }
-              )
-            }
-
-            VudsMode = $false
-          } | ConvertTo-Json -Depth 10
+            VudsMode        = $false
+          } | ConvertTo-Json -Depth 5
 
           $startResponse = Invoke-RestMethod `
             -Uri $startUrl `

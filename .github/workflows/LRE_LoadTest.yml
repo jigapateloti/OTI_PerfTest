@@ -31,9 +31,7 @@ jobs:
             "Content-Type" = "application/json"
           }
 
-          # -----------------------------
           # LOGIN
-          # -----------------------------
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
 
           $loginBody = @{
@@ -43,26 +41,11 @@ jobs:
 
           $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 
-          Invoke-RestMethod `
-            -Uri $loginUrl `
-            -Method POST `
-            -Headers $headers `
-            -Body $loginBody `
-            -WebSession $session `
-            -ErrorAction Stop
-
+          Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session -ErrorAction Stop
           Write-Host "Login successful."
 
-          # -----------------------------
-          # START RUN (Scenario Controlled)
-          # -----------------------------
+          # START RUN (Scenario Schedule)
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
-
-          # IMPORTANT:
-          # No TimeslotDuration
-          # No VusersDistribution
-          # No ramp logic
-          # LRE will use the schedule defined in the Test Instance
 
           $startBody = @{
             PostRunAction   = "Collate And Analyze"
@@ -71,48 +54,26 @@ jobs:
             VudsMode        = $false
           } | ConvertTo-Json -Depth 5
 
-          $startResponse = Invoke-RestMethod `
-            -Uri $startUrl `
-            -Method POST `
-            -Headers $headers `
-            -Body $startBody `
-            -WebSession $session `
-            -ErrorAction Stop
-
+          $startResponse = Invoke-RestMethod -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session -ErrorAction Stop
           $runId = $startResponse.ID
           Write-Host "Run ID: $runId"
 
-          # -----------------------------
           # POLLING LOOP
-          # -----------------------------
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
 
           do {
             Start-Sleep -Seconds 20
-
-            $statusResponse = Invoke-RestMethod `
-              -Uri $statusUrl `
-              -Method GET `
-              -Headers $headers `
-              -WebSession $session `
-              -ErrorAction Stop
-
+            $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
             $state = $statusResponse.RunState
             Write-Host "Current State: $state"
-
           } while ($state -ne "Finished" -and $state -ne "Failed")
 
           Write-Host "Run completed with state: $state"
 
-          # -----------------------------
           # COOLING PERIOD
-          # -----------------------------
-          Write-Host "Waiting 120 seconds for LRE to generate HTML report..."
           Start-Sleep -Seconds 120
 
-          # -----------------------------
           # GET RESULTS
-          # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
           $maxRetries = 15
@@ -120,19 +81,9 @@ jobs:
           $htmlReportNode = $null
 
           for ($i = 1; $i -le $maxRetries; $i++) {
-
-              $resultsResponse = Invoke-RestMethod `
-                -Uri $resultsUrl `
-                -Method GET `
-                -Headers $headers `
-                -WebSession $session `
-                -ErrorAction Stop
-
+              $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
               $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
-
               if ($htmlReportNode) { break }
-
-              Write-Host "HTML report not ready. Attempt $i of $maxRetries..."
               Start-Sleep -Seconds $retryDelay
           }
 
@@ -142,19 +93,10 @@ jobs:
 
           $resultId = $htmlReportNode.ID
 
-          # -----------------------------
           # DOWNLOAD REPORT
-          # -----------------------------
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
 
-          Invoke-WebRequest `
-            -Uri $reportUrl `
-            -OutFile "LRE-Report.zip" `
-            -WebSession $session `
-            -UseBasicParsing `
-            -ErrorAction Stop
-
-          Write-Host "Report downloaded: LRE-Report.zip"
+          Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing -ErrorAction Stop
 
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4

@@ -18,7 +18,7 @@ jobs:
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
 
-      LRE_TREND_REPORT_ID: ${{ vars.LRE_TREND_REPORT_ID }}
+      LRE_TREND_REPORT_ID: 6
 
       TEAMS_FLOW_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
 
@@ -28,6 +28,35 @@ jobs:
       - name: Run LRE Test
         shell: powershell
         run: |
+          # -------------------------------
+          # RETRY HELPER
+          # -------------------------------
+          function Invoke-WithRetry {
+              param(
+                  [Parameter(Mandatory=$true)] [string]$Uri,
+                  [Parameter(Mandatory=$true)] [string]$Method,
+                  [Parameter(Mandatory=$false)] $Headers,
+                  [Parameter(Mandatory=$false)] $Body,
+                  [Parameter(Mandatory=$false)] $WebSession,
+                  [int]$MaxRetries = 5,
+                  [int]$DelaySeconds = 10
+              )
+
+              for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+                  try {
+                      return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $Headers -Body $Body -WebSession $WebSession -ErrorAction Stop
+                  }
+                  catch {
+                      Write-Host "Attempt $attempt failed: $($_.Exception.Message)"
+                      if ($attempt -eq $MaxRetries) {
+                          throw "All retry attempts failed for $Uri"
+                      }
+                      Write-Host "Retrying in $DelaySeconds seconds..."
+                      Start-Sleep -Seconds $DelaySeconds
+                  }
+              }
+          }
+
           Write-Host "Authenticating to LRE..."
 
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -45,7 +74,7 @@ jobs:
           } | ConvertTo-Json
 
           $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-          Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session -ErrorAction Stop
+          Invoke-WithRetry -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session
 
           # START RUN
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
@@ -57,7 +86,7 @@ jobs:
             VudsMode = $false
           } | ConvertTo-Json -Depth 5
 
-          $startResponse = Invoke-RestMethod -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session -ErrorAction Stop
+          $startResponse = Invoke-WithRetry -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session
           $runId = $startResponse.ID
 
           if (-not $runId) { throw "Run ID missing" }
@@ -67,7 +96,7 @@ jobs:
 
           do {
             Start-Sleep -Seconds 20
-            $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method GET -Headers $headers -WebSession $session
+            $statusResponse = Invoke-WithRetry -Uri $statusUrl -Method GET -Headers $headers -WebSession $session
             $state = $statusResponse.RunState
           } while ($state -ne "Finished" -and $state -ne "Failed")
 
@@ -79,7 +108,7 @@ jobs:
 
           $htmlReportNode = $null
           for ($i = 1; $i -le 10; $i++) {
-            $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session
+            $resultsResponse = Invoke-WithRetry -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session
             $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
             if ($htmlReportNode) { break }
             Start-Sleep -Seconds 15
@@ -91,58 +120,72 @@ jobs:
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
           Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing
 
-          # TREND UPLOAD (FIXED ENDPOINT)
-          if ($env:LRE_TREND_REPORT_ID) {
+          # TREND UPLOAD
+          $trendUploadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs/$runId"
+          Invoke-WithRetry -Uri $trendUploadUrl -Method POST -Headers $headers -WebSession $session
 
-            $trendUploadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs/$runId"
+          # GET ALL TREND RUNS
+          $trendRunsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs"
+          $trendRuns = Invoke-WithRetry -Uri $trendRunsUrl -Method GET -Headers $headers -WebSession $session
 
-            Invoke-RestMethod -Uri $trendUploadUrl -Method POST -Headers $headers -WebSession $session -ErrorAction Stop
+          # FIRST RUN LOGIC
+          if ($trendRuns.Count -eq 1) {
+              Write-Host "Only one run exists. Setting baseline."
 
-            # AUTO-DETECT TREND FIELDS
-            $trendRunsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs"
-            $trendRuns = Invoke-RestMethod -Uri $trendRunsUrl -Method GET -Headers $headers -WebSession $session
-
-            if ($trendRuns.Count -lt 2) { throw "Not enough runs for comparison" }
-
-            $runIdField = ($trendRuns[0].PSObject.Properties |
-                           Where-Object { $_.Name -match "RunID|ID|RunId|runId" } |
-                           Select-Object -First 1).Name
-
-            $numericFields = @()
-            foreach ($prop in $trendRuns[0].PSObject.Properties) {
-              if ($prop.Value -as [double] -and $prop.Name -ne $runIdField) {
-                $numericFields += $prop.Name
+              $payload = @{
+                runId     = $runId
+                status    = $state
+                reportUrl = $env:GH_RUN_URL
+                message   = "Baseline established. Comparison will begin from next run."
+                runDate   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
               }
-            }
 
-            $sortedRuns = $trendRuns | Sort-Object { $_.$runIdField }
-            $baselineRun = $sortedRuns[$sortedRuns.Count - 2]
-            $currentRun  = $sortedRuns[$sortedRuns.Count - 1]
-
-            $regressionDetected = $false
-
-            foreach ($field in $numericFields) {
-              $baselineValue = [double]$baselineRun.$field
-              $currentValue  = [double]$currentRun.$field
-              if ($baselineValue -eq 0) { continue }
-              if ($currentValue -gt ($baselineValue * 1.20)) {
-                $regressionDetected = $true
-              }
-            }
-
-            if ($regressionDetected) { throw "Trend regression detected" }
+              Invoke-WithRetry -Uri $env:TEAMS_FLOW_WEBHOOK_URL -Method POST -ContentType "application/json" -Body ($payload | ConvertTo-Json -Depth 5)
+              exit 0
           }
 
-          # TEAMS NOTIFICATION (ONLY ON SUCCESS)
+          # AUTO-DETECT RUNID FIELD
+          $runIdField = ($trendRuns[0].PSObject.Properties |
+                         Where-Object { $_.Name -match "RunID|ID|RunId|runId" } |
+                         Select-Object -First 1).Name
+
+          # SORT RUNS
+          $sortedRuns = $trendRuns | Sort-Object { $_.$runIdField }
+          $baselineRun = $sortedRuns[$sortedRuns.Count - 2]
+          $currentRun  = $sortedRuns[$sortedRuns.Count - 1]
+
+          # FIND NUMERIC FIELDS
+          $numericFields = @()
+          foreach ($prop in $trendRuns[0].PSObject.Properties) {
+            if ($prop.Value -as [double] -and $prop.Name -ne $runIdField) {
+              $numericFields += $prop.Name
+            }
+          }
+
+          # COMPARE
+          $regressionDetected = $false
+
+          foreach ($field in $numericFields) {
+            $baselineValue = [double]$baselineRun.$field
+            $currentValue  = [double]$currentRun.$field
+            if ($baselineValue -eq 0) { continue }
+            if ($currentValue -gt ($baselineValue * 1.20)) {
+              $regressionDetected = $true
+            }
+          }
+
+          if ($regressionDetected) { throw "Trend regression detected" }
+
+          # TEAMS NOTIFICATION
           $payload = @{
             runId     = $runId
             status    = $state
             reportUrl = $env:GH_RUN_URL
-            message   = "HTML report is available in the pipeline artifacts."
+            message   = "Trend comparison passed. No regression detected."
             runDate   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
           }
 
-          Invoke-RestMethod -Uri $env:TEAMS_FLOW_WEBHOOK_URL -Method POST -ContentType "application/json" -Body ($payload | ConvertTo-Json -Depth 5)
+          Invoke-WithRetry -Uri $env:TEAMS_FLOW_WEBHOOK_URL -Method POST -ContentType "application/json" -Body ($payload | ConvertTo-Json -Depth 5)
 
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4

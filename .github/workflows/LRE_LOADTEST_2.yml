@@ -21,6 +21,9 @@ jobs:
       # Trend Report ID (must be set in repo/org variables)
       LRE_TREND_REPORT_ID: ${{ vars.LRE_TREND_REPORT_ID }}
 
+      # Teams webhook stored safely in env var
+      TEAMS_FLOW_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
+
     steps:
       - name: Run LRE Test
         shell: powershell
@@ -120,7 +123,7 @@ jobs:
           Write-Host "Report downloaded: LRE-Report.zip"
 
           # -----------------------------
-          # TREND REPORT UPLOAD
+          # TREND REPORT UPLOAD + AUTO-DETECT COMPARISON
           # -----------------------------
           if ($env:LRE_TREND_REPORT_ID) {
 
@@ -224,7 +227,7 @@ jobs:
           # -----------------------------
           # TEAMS NOTIFICATION
           # -----------------------------
-          $teamsWebhookUrl = "${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}"
+          $teamsWebhookUrl = $env:TEAMS_FLOW_WEBHOOK_URL
 
           $payload = @{
               runId     = $runId

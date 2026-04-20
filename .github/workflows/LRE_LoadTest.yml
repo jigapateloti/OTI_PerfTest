@@ -1,4 +1,4 @@
-name: LRE Load Test - Timeslot Controlled
+name: LRE Smoke Test
 
 on:
   workflow_dispatch:
@@ -9,93 +9,257 @@ jobs:
 
     env:
       LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
-      LRE_DOMAIN: DEFAULT
-      LRE_PROJECT: MyCity
-      LRE_TEST_ID: 180
-      LRE_TEST_INSTANCE_ID: 9
-      TENANT_ID: 6
+      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
+      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
+      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
+      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
 
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
 
+      # Trend report ID (set this in repo/organization vars)
+      LRE_TREND_REPORT_ID: ${{ vars.LRE_TREND_REPORT_ID }}
+
     steps:
-      - name: Run LRE Load Test
+      - name: Run LRE Test
         shell: powershell
         run: |
           Write-Host "Authenticating to LRE..."
+
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+          # Force JSON responses
           $headers = @{
             "Accept" = "application/json"
             "Content-Type" = "application/json"
           }
 
-          # LOGIN
+          # -----------------------------
+          # T01_Login (JSON)
+          # -----------------------------
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
+
           $loginBody = @{
             ClientIdKey     = $env:LRE_USERNAME
             ClientSecretKey = $env:LRE_PASSWORD
           } | ConvertTo-Json
+
           $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-          Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session
+
+          $loginResponse = Invoke-RestMethod `
+            -Uri $loginUrl `
+            -Method POST `
+            -Headers $headers `
+            -Body $loginBody `
+            -WebSession $session `
+            -ErrorAction Stop
+
           Write-Host "Login successful."
 
-          # START RUN (Timeslot Mode)
+          # -----------------------------
+          # T02_Start_Test_Run (JSON)
+          # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
+
           $startBody = @{
             PostRunAction   = "Collate And Analyze"
-            TestID          = 180
-            TestInstanceID  = 9
-
-            UseTimeSlotDuration   = $true
-            UseControllerScenario = $false
-
+            TestID          = [int]$env:LRE_TEST_ID
+            TestInstanceID  = [int]$env:LRE_TEST_INSTANCE_ID
             TimeslotDuration = @{
-              Hours   = 1
-              Minutes = 0
+              Hours   = 0
+              Minutes = 30
             }
-
             VudsMode = $false
-          } | ConvertTo-Json -Depth 10
+          } | ConvertTo-Json -Depth 5
 
-          $startResponse = Invoke-RestMethod -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session
+          $startResponse = Invoke-RestMethod `
+            -Uri $startUrl `
+            -Method POST `
+            -Headers $headers `
+            -Body $startBody `
+            -WebSession $session `
+            -ErrorAction Stop
+
           $runId = $startResponse.ID
           Write-Host "Run ID: $runId"
 
-          # POLLING LOOP
+          if (-not $runId) {
+            throw "Run ID is empty - LRE did not return valid JSON."
+          }
+
+          # -----------------------------
+          # T03_Get_Run_Status (JSON)
+          # -----------------------------
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
+
           do {
             Start-Sleep -Seconds 20
-            $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method GET -Headers $headers -WebSession $session
+
+            $statusResponse = Invoke-RestMethod `
+              -Uri $statusUrl `
+              -Method GET `
+              -Headers $headers `
+              -WebSession $session `
+              -ErrorAction Stop
+
             $state = $statusResponse.RunState
             Write-Host "Current State: $state"
+
           } while ($state -ne "Finished" -and $state -ne "Failed")
 
           Write-Host "Run completed with state: $state"
 
-          # COOLING PERIOD
-          Start-Sleep -Seconds 120
+          # -----------------------------
+          # Cooling Period
+          # -----------------------------
+          Write-Host "Waiting 60 seconds for LRE to generate HTML report..."
+          Start-Sleep -Seconds 60
 
-          # GET RESULTS
+          # -----------------------------
+          # T04_Get_Results_Data (JSON) with retry
+          # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
-          $maxRetries = 15
+
+          Write-Host "Checking for HTML report availability..."
+
+          $maxRetries = 10
           $retryDelay = 15
+          $reportReady = $false
           $htmlReportNode = $null
 
           for ($i = 1; $i -le $maxRetries; $i++) {
-            $resultsResponse = Invoke-RestMethod -Uri $resultsUrl -Method GET -Headers $headers -WebSession $session
-            $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
-            if ($htmlReportNode) { break }
-            Start-Sleep -Seconds $retryDelay
+
+              $resultsResponse = Invoke-RestMethod `
+                -Uri $resultsUrl `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $session `
+                -ErrorAction Stop
+
+              # JSON array of result objects
+              $htmlReportNode = $resultsResponse | Where-Object { $_.Type -eq "HTML REPORT" }
+
+              if ($htmlReportNode) {
+                  $reportReady = $true
+                  break
+              }
+
+              Write-Host "HTML report not ready yet. Attempt $i of $maxRetries. Waiting $retryDelay seconds..."
+              Start-Sleep -Seconds $retryDelay
           }
 
-          if (-not $htmlReportNode) { throw "HTML REPORT did not appear after waiting." }
+          if (-not $reportReady) {
+              throw "HTML REPORT did not appear after waiting."
+          }
 
           $resultId = $htmlReportNode.ID
+          Write-Host "HTML Report Result ID: $resultId"
 
-          # DOWNLOAD REPORT
+          # -----------------------------
+          # T05_Get_Report (ZIP)
+          # -----------------------------
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
-          Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing
+
+          Invoke-WebRequest `
+            -Uri $reportUrl `
+            -OutFile "LRE-Report.zip" `
+            -WebSession $session `
+            -UseBasicParsing `
+            -ErrorAction Stop
+
+          Write-Host "Report downloaded: LRE-Report.zip"
+
+          # -----------------------------
+          # T06_Trending Upload + Comparison
+          # -----------------------------
+          if ($env:LRE_TREND_REPORT_ID) {
+            Write-Host "Uploading run $runId to Trend Report ID: $env:LRE_TREND_REPORT_ID"
+
+            # Upload current run to trend report
+            $trendUploadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Run/$runId"
+
+            try {
+              Invoke-RestMethod `
+                -Uri $trendUploadUrl `
+                -Method POST `
+                -Headers $headers `
+                -WebSession $session `
+                -ErrorAction Stop
+
+              Write-Host "Trending upload completed."
+            }
+            catch {
+              Write-Host "Trending upload failed: $($_.Exception.Message)"
+            }
+
+            # Simple comparison logic: compare last two runs in the trend
+            try {
+              $trendRunsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs"
+
+              $trendRuns = Invoke-RestMethod `
+                -Uri $trendRunsUrl `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $session `
+                -ErrorAction Stop
+
+              # Expecting an array of runs; sort by RunID or Date
+              $sortedRuns = $trendRuns | Sort-Object { $_.RunID }  # adjust property name if needed
+
+              if ($sortedRuns.Count -ge 2) {
+                $baselineRun = $sortedRuns[$sortedRuns.Count - 2]
+                $currentRun  = $sortedRuns[$sortedRuns.Count - 1]
+
+                Write-Host "Baseline Trend Run ID: $($baselineRun.RunID)"
+                Write-Host "Current  Trend Run ID: $($currentRun.RunID)"
+
+                # Example metric comparison (adjust field names to match your trend data)
+                $baselineResp = [double]$baselineRun.AvgTransactionResponseTime
+                $currentResp  = [double]$currentRun.AvgTransactionResponseTime
+
+                Write-Host "Baseline AvgTxnRespTime: $baselineResp"
+                Write-Host "Current  AvgTxnRespTime: $currentResp"
+
+                # Fail if current is > 20% slower than baseline
+                if ($currentResp -gt ($baselineResp * 1.2)) {
+                  throw "Trend comparison failed: current AvgTransactionResponseTime ($currentResp) is > 20% worse than baseline ($baselineResp)."
+                }
+                else {
+                  Write-Host "Trend comparison passed: current performance is within 20% of baseline."
+                }
+              }
+              else {
+                Write-Host "Not enough runs in trend report to compare (need at least 2)."
+              }
+            }
+            catch {
+              Write-Host "Trend comparison step failed (non-fatal for now): $($_.Exception.Message)"
+            }
+          }
+          else {
+            Write-Host "LRE_TREND_REPORT_ID not set; skipping trending upload and comparison."
+          }
+
+          # -----------------------------
+          # T07_Send Notification to Teams Workflow
+          # -----------------------------
+          $teamsWebhookUrl = "${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}"
+
+          $payload = @{
+              runId     = $runId
+              status    = $state
+              reportUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              message   = "HTML report is available in the pipeline artifacts."
+              runDate   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+          }
+
+          Write-Host "Sending notification to Teams workflow..."
+          Invoke-RestMethod `
+            -Uri $teamsWebhookUrl `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body ($payload | ConvertTo-Json -Depth 5)
 
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4

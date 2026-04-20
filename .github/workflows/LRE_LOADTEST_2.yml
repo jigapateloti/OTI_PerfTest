@@ -18,10 +18,9 @@ jobs:
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
 
-      # Trend Report ID (must be set in repo/org variables)
       LRE_TREND_REPORT_ID: ${{ vars.LRE_TREND_REPORT_ID }}
 
-      # Teams webhook stored safely in env var
+      # Teams webhook stored safely
       TEAMS_FLOW_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
 
     steps:
@@ -37,9 +36,7 @@ jobs:
             "Content-Type" = "application/json"
           }
 
-          # -----------------------------
           # LOGIN
-          # -----------------------------
           $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
           $loginBody = @{
             ClientIdKey     = $env:LRE_USERNAME
@@ -50,9 +47,7 @@ jobs:
           Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session -ErrorAction Stop
           Write-Host "Login successful."
 
-          # -----------------------------
           # START TEST RUN
-          # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
           $startBody = @{
             PostRunAction   = "Collate And Analyze"
@@ -71,9 +66,7 @@ jobs:
 
           if (-not $runId) { throw "Run ID is empty - LRE did not return valid JSON." }
 
-          # -----------------------------
           # POLL RUN STATUS
-          # -----------------------------
           $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
 
           do {
@@ -85,15 +78,11 @@ jobs:
 
           Write-Host "Run completed with state: $state"
 
-          # -----------------------------
           # WAIT FOR REPORT GENERATION
-          # -----------------------------
           Write-Host "Waiting 60 seconds for LRE to generate HTML report..."
           Start-Sleep -Seconds 60
 
-          # -----------------------------
           # GET RESULTS (HTML REPORT)
-          # -----------------------------
           $resultsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results"
 
           $maxRetries = 10
@@ -115,16 +104,12 @@ jobs:
           $resultId = $htmlReportNode.ID
           Write-Host "HTML Report Result ID: $resultId"
 
-          # -----------------------------
           # DOWNLOAD REPORT
-          # -----------------------------
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
           Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing -ErrorAction Stop
           Write-Host "Report downloaded: LRE-Report.zip"
 
-          # -----------------------------
           # TREND REPORT UPLOAD + AUTO-DETECT COMPARISON
-          # -----------------------------
           if ($env:LRE_TREND_REPORT_ID) {
 
             Write-Host "Uploading run $runId to Trend Report ID: $env:LRE_TREND_REPORT_ID"
@@ -134,9 +119,7 @@ jobs:
             Invoke-RestMethod -Uri $trendUploadUrl -Method POST -Headers $headers -WebSession $session -ErrorAction Stop
             Write-Host "Trending upload completed."
 
-            # -----------------------------
             # AUTO-DETECT TREND FIELDS
-            # -----------------------------
             Write-Host "Fetching trend runs for auto-detection..."
 
             $trendRunsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs"
@@ -185,9 +168,7 @@ jobs:
             Write-Host "Baseline Run ID: $($baselineRun.$runIdField)"
             Write-Host "Current  Run ID: $($currentRun.$runIdField)"
 
-            # -----------------------------
             # KPI COMPARISON
-            # -----------------------------
             $regressionDetected = $false
             $regressionMessages = @()
 
@@ -224,9 +205,7 @@ jobs:
             Write-Host "LRE_TREND_REPORT_ID not set. Skipping trending upload + comparison."
           }
 
-          # -----------------------------
-          # TEAMS NOTIFICATION
-          # -----------------------------
+          # TEAMS NOTIFICATION (ONLY ON SUCCESS)
           $teamsWebhookUrl = $env:TEAMS_FLOW_WEBHOOK_URL
 
           $payload = @{

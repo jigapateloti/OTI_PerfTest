@@ -91,11 +91,12 @@ jobs:
           $reportUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId/Results/$resultId/data"
           Invoke-WebRequest -Uri $reportUrl -OutFile "LRE-Report.zip" -WebSession $session -UseBasicParsing
 
-          # TREND UPLOAD
+          # TREND UPLOAD (FIXED ENDPOINT)
           if ($env:LRE_TREND_REPORT_ID) {
 
-            $trendUploadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Run/$runId"
-            Invoke-RestMethod -Uri $trendUploadUrl -Method POST -Headers $headers -WebSession $session
+            $trendUploadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs/$runId"
+
+            Invoke-RestMethod -Uri $trendUploadUrl -Method POST -Headers $headers -WebSession $session -ErrorAction Stop
 
             # AUTO-DETECT TREND FIELDS
             $trendRunsUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$env:LRE_TREND_REPORT_ID/Runs"

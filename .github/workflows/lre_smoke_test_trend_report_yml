@@ -1,0 +1,257 @@
+name: LRE Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-lre-test:
+    runs-on: self-hosted
+
+    env:
+      LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
+      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
+      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
+      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
+      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      LRE_TEST_SET_ID: ${{ vars.LRE_TEST_SET_ID }}
+      LRE_BASELINE_RUN_ID: ${{ vars.LRE_BASELINE_RUN_ID }}
+      CI_PROJECT_DIR: ${{ vars.CI_PROJECT_DIR }}
+
+      LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
+      LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
+
+    steps:
+      - name: Run LRE Test and Generate Trend Report
+        shell: powershell
+        run: |
+          Write-Host "Authenticating to LRE..."
+
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          # Force JSON responses
+          $headers = @{
+            "Accept" = "application/json"
+            "Content-Type" = "application/json"
+          }
+
+          # Create a web session to persist cookies/auth
+          $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+          # -----------------------------
+          # T01_Login (JSON)
+          # -----------------------------
+          $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
+
+          $loginBody = @{
+            ClientIdKey     = $env:LRE_USERNAME
+            ClientSecretKey = $env:LRE_PASSWORD
+          } | ConvertTo-Json
+
+          try {
+            $loginResponse = Invoke-RestMethod `
+              -Uri $loginUrl `
+              -Method POST `
+              -Headers $headers `
+              -Body $loginBody `
+              -WebSession $session `
+              -ErrorAction Stop
+
+            Write-Host "Login successful."
+          }
+          catch {
+            Write-Error "Login failed: $($_.Exception.Message)"
+            throw
+          }
+
+          # -----------------------------
+          # T02_Start_Test_Run (JSON)
+          # -----------------------------
+          $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
+
+          $startBody = @{
+            PostRunAction    = "Collate And Analyze"
+            TestID           = [int]$env:LRE_TEST_ID
+            TestInstanceID   = [int]$env:LRE_TEST_INSTANCE_ID
+            TimeslotDuration = @{
+              Hours   = 0
+              Minutes = 30
+            }
+            VudsMode = $false
+          } | ConvertTo-Json -Depth 5
+
+          try {
+            $startResponse = Invoke-RestMethod `
+              -Uri $startUrl `
+              -Method POST `
+              -Headers $headers `
+              -Body $startBody `
+              -WebSession $session `
+              -ErrorAction Stop
+
+            $runId = $startResponse.ID
+            Write-Host "Run ID: $runId"
+          }
+          catch {
+            Write-Error "Failed to start run: $($_.Exception.Message)"
+            throw
+          }
+
+          if (-not $runId) {
+            throw "Run ID is empty - LRE did not return valid JSON."
+          }
+
+          # -----------------------------
+          # T03_Get_Run_STATUS (JSON)
+          # -----------------------------
+          $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
+
+          do {
+            Start-Sleep -Seconds 20
+
+            $statusResponse = Invoke-RestMethod `
+              -Uri $statusUrl `
+              -Method GET `
+              -Headers $headers `
+              -WebSession $session `
+              -ErrorAction Stop
+
+            $state = $statusResponse.RunState
+            Write-Host "Current State: $state"
+
+          } while ($state -ne "Finished" -and $state -ne "Failed")
+
+          Write-Host "Run completed with state: $state"
+
+          # -----------------------------
+          # Cooling Period
+          # -----------------------------
+          Write-Host "Waiting 60 seconds for LRE to generate HTML/PDF report..."
+          Start-Sleep -Seconds 60
+
+          # -----------------------------
+          # T03_Create_Trend_Report (JSON)
+          # -----------------------------
+          $trendUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports"
+
+          $trendBody = @{
+              Name        = "lre_trend_report"
+              Description = "Trend Report"
+          } | ConvertTo-Json -Depth 5
+
+          try {
+            $trendResponse = Invoke-RestMethod `
+              -Uri $trendUrl `
+              -Method POST `
+              -Headers $headers `
+              -Body $trendBody `
+              -WebSession $session `
+              -ErrorAction Stop
+
+            $trendId = $trendResponse.ID
+            Write-Host "Trend Report Created. ID: $trendId"
+          }
+          catch {
+            Write-Error "Failed to create trend report: $($_.Exception.Message)"
+            throw
+          }
+
+          # -----------------------------
+          # T04_Add_Run_to_Trend_REPORT (JSON Body)
+          # -----------------------------
+          $runIdsToTrend = @($runId)
+          if ($env:LRE_BASELINE_RUN_ID) {
+            $runIdsToTrend += [int]$env:LRE_BASELINE_RUN_ID
+          }
+
+          foreach ($currentRunId in $runIdsToTrend) {
+              $addRunUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$trendId"
+
+              $addRunBody = @{
+                  Project   = "$env:LRE_PROJECT"
+                  TestSetId = if ($env:LRE_TEST_SET_ID) { [int]$env:LRE_TEST_SET_ID } else { $null }
+                  TestId    = [int]$env:LRE_TEST_ID
+                  RunId     = [int]$currentRunId
+              } | ConvertTo-Json -Depth 5
+
+              Write-Host "Adding Run ID: $currentRunId to Trend Report: $trendId..."
+
+              try {
+                $addRunResponse = Invoke-RestMethod `
+                  -Uri $addRunUrl `
+                  -Method POST `
+                  -Headers $headers `
+                  -Body $addRunBody `
+                  -WebSession $session `
+                  -ErrorAction Stop
+
+                Write-Host "Successfully added Run ID: $currentRunId"
+              }
+              catch {
+                Write-Warning "Failed to add Run ID $currentRunId to trend report: $($_.Exception.Message)"
+              }
+          }
+
+          # -----------------------------
+          # T05_Download_Trend_REPORT_PDF
+          # -----------------------------
+          $downloadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$trendId/data"
+
+          if (-not $env:CI_PROJECT_DIR -or $env:CI_PROJECT_DIR -eq "") {
+            $outDir = "$PWD"
+          } else {
+            $outDir = $env:CI_PROJECT_DIR
+          }
+
+          if (-not (Test-Path -Path $outDir)) {
+            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          }
+
+          $filePath = Join-Path -Path $outDir -ChildPath "TrendReport_$trendId.pdf"
+
+          Write-Host "Downloading PDF report from: $downloadUrl to $filePath"
+
+          try {
+              Invoke-WebRequest `
+                -Uri $downloadUrl `
+                -Method GET `
+                -Headers $headers `
+                -WebSession $session `
+                -OutFile $filePath `
+                -ErrorAction Stop
+
+              Write-Host "Success! Trend Report saved to: $filePath"
+          }
+          catch {
+              Write-Warning "Download failed. LRE may take a minute to generate the PDF after runs are added."
+              Write-Error $_.Exception.Message
+          }
+
+          # -----------------------------
+          # NEW: 2-minute cooling period before zipping/uploading
+          # -----------------------------
+          Write-Host "Cooling for 2 minutes to ensure report generation is complete..."
+          Start-Sleep -Seconds 120
+
+          # -----------------------------
+          # Zip the report for artifact upload
+          # -----------------------------
+          $zipPath = Join-Path -Path $outDir -ChildPath "LRE-Report_$trendId.zip"
+          try {
+            if (Test-Path -Path $filePath) {
+              if (Test-Path -Path $zipPath) { Remove-Item -Path $zipPath -Force }
+              Compress-Archive -Path $filePath -DestinationPath $zipPath -Force
+              Write-Host "Zipped report to: $zipPath"
+            } else {
+              Write-Warning "PDF not found; skipping zip creation."
+            }
+          }
+          catch {
+            Write-Warning "Failed to create zip: $($_.Exception.Message)"
+          }
+
+      - name: Upload LRE Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LRE-Report
+          path: ${{ env.CI_PROJECT_DIR }}/LRE-Report_*.zip

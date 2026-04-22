@@ -1,0 +1,212 @@
+name: Test Teams Notification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-lre-test:
+    runs-on: self-hosted
+
+    env:
+      LRE_BASE_URL: ${{ vars.LRE_BASE_URL }}
+      LRE_DOMAIN: ${{ vars.LRE_DOMAIN }}
+      LRE_PROJECT: ${{ vars.LRE_PROJECT }}
+      LRE_TEST_ID: ${{ vars.LRE_TEST_ID }}
+      LRE_TEST_INSTANCE_ID: ${{ vars.LRE_TEST_INSTANCE_ID }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      LRE_TEST_SET_ID: ${{ vars.LRE_TEST_SET_ID }}
+      LRE_BASELINE_RUN_ID: ${{ vars.LRE_BASELINE_RUN_ID }}
+      CI_PROJECT_DIR: ${{ vars.CI_PROJECT_DIR }}
+
+      LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
+      LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
+
+    steps:
+      - name: Run LRE Test and Generate Trend Report
+        id: run_lre
+        shell: powershell
+        run: |
+          Write-Host "Authenticating to LRE..."
+
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $headers = @{
+            "Accept" = "application/json"
+            "Content-Type" = "application/json"
+          }
+
+          $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+          # -----------------------------
+          # LOGIN
+          # -----------------------------
+          $loginUrl = "$env:LRE_BASE_URL/LoadTest/rest/authentication-point/AuthenticateClient?tenant=$env:TENANT_ID"
+
+          $loginBody = @{
+            ClientIdKey     = $env:LRE_USERNAME
+            ClientSecretKey = $env:LRE_PASSWORD
+          } | ConvertTo-Json
+
+          $loginResponse = Invoke-RestMethod -Uri $loginUrl -Method POST -Headers $headers -Body $loginBody -WebSession $session -ErrorAction Stop
+          Write-Host "Login successful."
+
+          # -----------------------------
+          # START RUN
+          # -----------------------------
+          $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
+
+          $startBody = @{
+            PostRunAction    = "Collate And Analyze"
+            TestID           = [int]$env:LRE_TEST_ID
+            TestInstanceID   = [int]$env:LRE_TEST_INSTANCE_ID
+            TimeslotDuration = @{ Hours = 0; Minutes = 30 }
+            VudsMode         = $false
+          } | ConvertTo-Json -Depth 5
+
+          $startResponse = Invoke-RestMethod -Uri $startUrl -Method POST -Headers $headers -Body $startBody -WebSession $session -ErrorAction Stop
+
+          $runId = $startResponse.ID
+          Write-Host "Run ID: $runId"
+
+          # -----------------------------
+          # POLL RUN STATUS
+          # -----------------------------
+          $statusUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs/$runId"
+
+          do {
+            Start-Sleep -Seconds 20
+            $statusResponse = Invoke-RestMethod -Uri $statusUrl -Method GET -Headers $headers -WebSession $session -ErrorAction Stop
+            $state = $statusResponse.RunState
+            Write-Host "Current State: $state"
+          } while ($state -ne "Finished" -and $state -ne "Failed")
+
+          Write-Host "Run completed with state: $state"
+
+          # -----------------------------
+          # COOLING PERIOD BEFORE TREND
+          # -----------------------------
+          Write-Host "Waiting 60 seconds before generating trend report..."
+          Start-Sleep -Seconds 60
+
+          # -----------------------------
+          # CREATE UNIQUE TREND REPORT
+          # -----------------------------
+          $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+          $trendName = "lre_trend_report_${runId}_$timestamp"
+          $trendDesc = "Trend_Report_${runId}_$timestamp"
+
+          $trendUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports"
+
+          $trendBody = @{
+            Name        = $trendName
+            Description = $trendDesc
+          } | ConvertTo-Json -Depth 5
+
+          $trendResponse = Invoke-RestMethod -Uri $trendUrl -Method POST -Headers $headers -Body $trendBody -WebSession $session -ErrorAction Stop
+
+          $trendId = $trendResponse.ID
+          Write-Host "Trend Report Created. ID: $trendId"
+
+          # -----------------------------
+          # ADD RUN(S) TO TREND REPORT
+          # -----------------------------
+          $runIdsToTrend = @($runId)
+          if ($env:LRE_BASELINE_RUN_ID) { $runIdsToTrend += [int]$env:LRE_BASELINE_RUN_ID }
+
+          foreach ($currentRunId in $runIdsToTrend) {
+            $addRunUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$trendId"
+
+            $addRunBody = @{
+              Project   = "$env:LRE_PROJECT"
+              TestSetId = if ($env:LRE_TEST_SET_ID) { [int]$env:LRE_TEST_SET_ID } else { $null }
+              TestId    = [int]$env:LRE_TEST_ID
+              RunId     = [int]$currentRunId
+            } | ConvertTo-Json -Depth 5
+
+            Write-Host "Adding Run ID: $currentRunId to Trend Report: $trendId..."
+
+            Invoke-RestMethod -Uri $addRunUrl -Method POST -Headers $headers -Body $addRunBody -WebSession $session -ErrorAction Stop
+          }
+
+          # -----------------------------
+          # DOWNLOAD TREND REPORT PDF
+          # -----------------------------
+          $downloadUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports/$trendId/data"
+
+          $outDir = if ($env:CI_PROJECT_DIR) { $env:CI_PROJECT_DIR } else { "$PWD" }
+          if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+
+          $filePath = Join-Path $outDir "TrendReport_$trendId.pdf"
+
+          Write-Host "Downloading PDF from: $downloadUrl"
+
+          Invoke-WebRequest -Uri $downloadUrl -Method GET -Headers $headers -WebSession $session -OutFile $filePath -ErrorAction Stop
+
+          Write-Host "PDF saved to: $filePath"
+
+          # -----------------------------
+          # 2-MIN COOLING BEFORE UPLOAD
+          # -----------------------------
+          Write-Host "Cooling for 2 minutes..."
+          Start-Sleep -Seconds 120
+
+          # -----------------------------
+          # ZIP HANDLING (NO DOUBLE ZIP)
+          # -----------------------------
+          $ext = [System.IO.Path]::GetExtension($filePath)
+
+          if ($ext -eq ".zip") {
+            Write-Host "File already ZIP. Using as-is."
+            $artifactPath = $filePath
+          }
+          else {
+            Write-Host "File is PDF. Creating ZIP..."
+            $zipPath = Join-Path $outDir "LRE-Report_$trendId.zip"
+            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+            Compress-Archive -Path $filePath -DestinationPath $zipPath -Force
+            $artifactPath = $zipPath
+          }
+
+          # -----------------------------
+          # EXPORT OUTPUTS
+          # -----------------------------
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "runId=$runId"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "trendId=$trendId"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifactPath=$artifactPath"
+
+      - name: Upload LRE Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LRE-Trend-Report
+          path: ${{ steps.run_lre.outputs.artifactPath }}
+
+      - name: Notify Microsoft Teams (Trend Report)
+        if: always()
+        shell: powershell
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
+          RUN_ID: ${{ steps.run_lre.outputs.runId }}
+          TREND_ID: ${{ steps.run_lre.outputs.trendId }}
+          ARTIFACT_PATH: ${{ steps.run_lre.outputs.artifactPath }}
+        run: |
+          Write-Host "Preparing Teams notification for Trend Report..."
+
+          $payload = @{
+              runId      = $env:RUN_ID
+              trendId    = $env:TREND_ID
+              status     = "Trend Report Generated"
+              reportUrl  = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              artifact   = $env:ARTIFACT_PATH
+              message    = "Trend Report PDF is available in the pipeline artifacts."
+              runDate    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+          }
+
+          Write-Host "Sending Trend Report notification to Teams workflow..."
+          Invoke-RestMethod `
+            -Uri $env:TEAMS_WEBHOOK_URL `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body ($payload | ConvertTo-Json -Depth 5)
+
+          Write-Host "Teams notification sent successfully."

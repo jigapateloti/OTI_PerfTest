@@ -1,4 +1,4 @@
-name: LRE Trend Report
+name: LRE Smoke Test
 
 on:
   workflow_dispatch:
@@ -20,9 +20,11 @@ jobs:
 
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
+      TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
 
     steps:
       - name: Run LRE Test and Generate Trend Report
+        id: run_lre
         shell: powershell
         run: |
           Write-Host "Authenticating to LRE..."
@@ -65,7 +67,7 @@ jobs:
           }
 
           # -----------------------------
-          # T02_Start_Test_Run (JSON)
+          # T02_Start_TEST_RUN (JSON)
           # -----------------------------
           $startUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/Runs"
 
@@ -250,8 +252,85 @@ jobs:
             Write-Warning "Failed to create zip: $($_.Exception.Message)"
           }
 
+          # -----------------------------
+          # Export runId and trendId as step outputs for later steps
+          # -----------------------------
+          # GitHub Actions requires writing to the GITHUB_OUTPUT file in the format "name=value"
+          if ($runId) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "runId=$runId"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "runId="
+          }
+
+          if ($trendId) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "trendId=$trendId"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "trendId="
+          }
+
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LRE-Report
           path: ${{ env.CI_PROJECT_DIR }}/LRE-Report_*.zip
+
+      - name: Notify Microsoft Teams
+        if: always()
+        shell: powershell
+        env:
+          TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
+          RUN_ID: ${{ steps.run_lre.outputs.runId }}
+          TREND_ID: ${{ steps.run_lre.outputs.trendId }}
+        run: |
+          # Build a message card for Teams
+          $server = $env:GITHUB_SERVER_URL
+          if (-not $server) { $server = "https://github.com" }
+          $repo = $env:GITHUB_REPOSITORY
+          $runIdGitHub = $env:GITHUB_RUN_ID
+          $runUrl = "$server/$repo/actions/runs/$runIdGitHub"
+
+          $bodyRunId = if ($env:RUN_ID -and $env:RUN_ID -ne "") { $env:RUN_ID } else { "N/A" }
+          $bodyTrendId = if ($env:TREND_ID -and $env:TREND_ID -ne "") { $env:TREND_ID } else { "N/A" }
+
+          $statusText = "Completed"
+
+          $messageCard = @{
+            "@type"    = "MessageCard"
+            "@context" = "http://schema.org/extensions"
+            "summary"  = "LRE Smoke Test Result"
+            "themeColor" = "0078D7"
+            "title"    = "LRE Smoke Test - Run Notification"
+            "sections" = @(
+              @{
+                "activityTitle" = "Run ID: $bodyRunId"
+                "facts" = @(
+                  @{ "name" = "Trend Report ID"; "value" = "$bodyTrendId" },
+                  @{ "name" = "Run State"; "value" = "$statusText" },
+                  @{ "name" = "Artifact"; "value" = "LRE-Report_$bodyTrendId.zip" }
+                )
+                "markdown" = $true
+              }
+            )
+            "potentialAction" = @(
+              @{
+                "@type" = "OpenUri"
+                "name"  = "View GitHub Run"
+                "targets" = @(
+                  @{ "os" = "default"; "uri" = $runUrl }
+                )
+              }
+            )
+          } | ConvertTo-Json -Depth 6
+
+          if (-not $env:TEAMS_WEBHOOK -or $env:TEAMS_WEBHOOK -eq "") {
+            Write-Warning "TEAMS_WEBHOOK is not set. Skipping Teams notification."
+            exit 0
+          }
+
+          try {
+            Invoke-RestMethod -Uri $env:TEAMS_WEBHOOK -Method Post -ContentType 'application/json' -Body $messageCard -ErrorAction Stop
+            Write-Host "Teams notification sent."
+          }
+          catch {
+            Write-Warning "Failed to send Teams notification: $($_.Exception.Message)"
+          }

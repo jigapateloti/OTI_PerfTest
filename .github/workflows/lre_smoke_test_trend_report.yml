@@ -134,10 +134,16 @@ jobs:
           # -----------------------------
           $trendUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports"
 
+          $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+
+          $trendName = "lre_trend_report_${runId}_$timestamp"
+          $trendDesc = "Trend_Report_${runId}_$timestamp"
+          
           $trendBody = @{
-              Name        = "lre_trend_report"
-              Description = "Trend Report"
+              Name        = $trendName
+              Description = $trendDesc
           } | ConvertTo-Json -Depth 5
+
 
           try {
             $trendResponse = Invoke-RestMethod `

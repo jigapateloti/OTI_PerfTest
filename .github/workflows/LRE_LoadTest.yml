@@ -137,8 +137,8 @@ jobs:
           $trendUrl = "$env:LRE_BASE_URL/LoadTest/rest/domains/$env:LRE_DOMAIN/projects/$env:LRE_PROJECT/TrendReports"
 
           $trendBody = @{
-              Name        = "lre_trend_report"
-              Description = "Trend Report"
+              Name        = "lre_trend_report_new"
+              Description = "Trend Report New"
           } | ConvertTo-Json -Depth 5
 
           try {

@@ -1,4 +1,4 @@
-name: LRE Smoke Test
+name: LRE Smoke Test And Trend Reort
 
 on:
   workflow_dispatch:

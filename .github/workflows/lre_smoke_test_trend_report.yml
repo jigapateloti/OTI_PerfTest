@@ -1,4 +1,4 @@
-name: LRE Smoke Test Trend Report
+name: LRE SMOKE TEST TREND REPORT
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
 
       LRE_USERNAME: ${{ secrets.LRE_USERNAME }}
       LRE_PASSWORD: ${{ secrets.LRE_PASSWORD }}
-      TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
 
     steps:
       - name: Run LRE Test and Generate Trend Report
@@ -178,5 +178,35 @@ jobs:
       - name: Upload LRE Report Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LRE-Report
+          name: LRE-Trend-Report
           path: ${{ steps.run_lre.outputs.artifactPath }}
+
+      - name: Notify Microsoft Teams (Trend Report)
+        if: always()
+        shell: powershell
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_FLOW_WEBHOOK_URL }}
+          RUN_ID: ${{ steps.run_lre.outputs.runId }}
+          TREND_ID: ${{ steps.run_lre.outputs.trendId }}
+          ARTIFACT_PATH: ${{ steps.run_lre.outputs.artifactPath }}
+        run: |
+          Write-Host "Preparing Teams notification for Trend Report..."
+
+          $payload = @{
+              runId      = $env:RUN_ID
+              trendId    = $env:TREND_ID
+              status     = "Trend Report Generated"
+              reportUrl  = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              artifact   = $env:ARTIFACT_PATH
+              message    = "Trend Report PDF is available in the pipeline artifacts."
+              runDate    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+          }
+
+          Write-Host "Sending Trend Report notification to Teams workflow..."
+          Invoke-RestMethod `
+            -Uri $env:TEAMS_WEBHOOK_URL `
+            -Method POST `
+            -ContentType "application/json" `
+            -Body ($payload | ConvertTo-Json -Depth 5)
+
+          Write-Host "Teams notification sent successfully."
